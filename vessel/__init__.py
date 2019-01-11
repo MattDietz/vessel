@@ -1,7 +1,7 @@
 import click
 
-from yumad import cli
+from vessel import shell
 
 
 def run():
-    cli()
+    shell.vessel()
