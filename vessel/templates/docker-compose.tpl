@@ -12,7 +12,7 @@ services:
     {%- if service.container_env_vars %}
     environment:
     {%- for name, value in service.container_env_vars.items() %}
-      {{ name }}: {{ service.escape_host_envvars(value) }}
+      {{ name }}: "{{ service.escape_host_envvars(value) }}"
     {%- endfor %}
     {%- endif %}
     {%- if service.command %}
@@ -22,7 +22,7 @@ services:
     {%- endif %}
     image: {{ service.image }}
     {%- if service.network_mode %}
-    network_mode: {{ service.network_mode }}
+    network_mode: "{{ service.network_mode }}"
     {%- endif %}
 
     {%- if service.ports %}

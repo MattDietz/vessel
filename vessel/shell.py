@@ -38,6 +38,7 @@ DEFAULT_PROJECT_CONFIG = {
     "image": "",
     "custom_build": False,
     "volumes": {},
+    "workdir": "",
     "ports": {},
     "language": "",
     "network_mode": "",
@@ -162,10 +163,6 @@ def _enforce_host_vars(cfg):
                 sys.exit(1)
 
 
-def _set_workdir_var():
-    os.environ.setdefault("WORKDIR", os.getcwd())
-
-
 def _check_initialized():
     if not os.path.exists(VESSEL_ROOT) or not os.path.exists(VESSEL_CONFIG):
         click.echo("Vessel is not initialized, please run `vessel init` first")
@@ -226,6 +223,28 @@ def _discover_projects(root_project):
         sub_services = _discover_projects(project)
         services.update(sub_services)
     return services
+
+
+def _pre_run(ctx, project):
+    _check_initialized()
+    if not _project_exists(project):
+        click.echo("No project named '{}' exists. "
+                   "You should create one!".format(project))
+        sys.exit(1)
+
+    if ctx.obj.debug:
+        click.echo("Setting {} as $WORKDIR".format(os.getcwd()))
+
+    # TODO Automagic env vars per service, maybe?
+    # etcd project
+    # $VESSEL_DATA => ~/.vessel/etcd/data
+    cfg = _load_config(project)
+    os.environ.setdefault("HOST_WORKDIR", os.getcwd())
+    os.environ.setdefault("CONTAINER_WORKDIR", cfg.get("workdir", "/"))
+    os.environ.setdefault("VESSEL_ROOT", VESSEL_ROOT)
+
+    _enforce_host_vars(cfg)
+    return cfg
 
 
 class CLIRoot(object):
@@ -322,17 +341,6 @@ def create(ctx, project, language):
 
 
 @vessel.command()
-@click.pass_context
-def list(ctx):
-    _check_initialized()
-    for root, dirs, files in os.walk(VESSEL_ROOT):
-        if root == VESSEL_ROOT:
-            continue
-        if CONFIG_FILE in files:
-            click.echo(os.path.split(root)[-1])
-
-
-@vessel.command()
 @click.argument("project")
 @click.pass_context
 def show(ctx, project):
@@ -372,16 +380,7 @@ def config(ctx):
 @click.argument("project")
 @click.pass_context
 def up(ctx, project):
-    _check_initialized()
-    if not _project_exists(project):
-        click.echo("No project named '{}' exists. "
-                   "You should create one!".format(project))
-        sys.exit(1)
-    _set_workdir_var()
-
-    # Dis gon git recursive
-    cfg = _load_config(project)
-    _enforce_host_vars(cfg)
+    _pre_run(ctx, project)
     compose_path = _project_compose_path(project)
     projects = _discover_projects(project).values()
     with open(compose_path, 'w') as f:
@@ -392,51 +391,75 @@ def up(ctx, project):
 
 
 @vessel.command()
-@click.argument("project")
-@click.argument("command")
+@click.argument("project", nargs=1)
+@click.argument("command", nargs=-1)
+@click.option("-s", "--service", default=None)
 @click.pass_context
-def run(ctx, project, command=None):
-    _check_initialized()
-    if not _project_exists(project):
-        click.echo("No project named '{}' exists. "
-                   "You should create one!".format(project))
-        sys.exit(1)
-    _set_workdir_var()
-
-    # Dis gon git recursive
-    cfg = _load_config(project)
-    _enforce_host_vars(cfg)
+def run(ctx, project, command, service):
+    cfg = _pre_run(ctx, project)
     compose_path = _project_compose_path(project)
     projects = _discover_projects(project).values()
     with open(compose_path, 'w') as f:
         f.write(_generate_compose(projects))
 
-    cmd = shlex.split("docker-compose -f {} run {}".format(compose_path,
-                                                           command))
-    subprocess.Popen(cmd)
+    service = service or project
+    cmd = ["docker-compose -f {} run".format(compose_path)]
+    if cfg.get("workdir"):
+        cmd.append("-w {}".format(cfg["workdir"]))
+
+    cmd.append(service)
+
+    if command:
+        cmd.extend(command)
+
+    cmd = " ".join(cmd)
+
+    if ctx.obj.debug:
+        click.echo(cmd)
+    cmd = shlex.split(cmd)
+    subprocess.Popen(cmd, stdin=sys.stdout, stdout=sys.stdin).wait()
+
+
+@vessel.command()
+@click.argument("project", nargs=1)
+@click.argument("command", nargs=-1)
+@click.option("-s", "--service", default=None)
+@click.pass_context
+def exec(ctx, project, command, service):
+    cfg = _pre_run(ctx, project)
+    compose_path = _project_compose_path(project)
+    projects = _discover_projects(project).values()
+    with open(compose_path, 'w') as f:
+        f.write(_generate_compose(projects))
+
+    service = service or project
+    cmd = ["docker-compose -f {} exec".format(compose_path)]
+
+    cmd.append(service)
+
+    if command:
+        cmd.extend(command)
+
+    cmd = " ".join(cmd)
+
+    if ctx.obj.debug:
+        click.echo(cmd)
+    cmd = shlex.split(cmd)
+    subprocess.Popen(cmd, stdin=sys.stdout, stdout=sys.stdin).wait()
 
 
 @vessel.command()
 @click.argument("project")
 @click.pass_context
 def export(ctx, project):
-    _check_initialized()
-    if not _project_exists(project):
-        click.echo("No project named '{}' exists. "
-                   "You should create one!".format(project))
-        sys.exit(1)
-    _set_workdir_var()
-
-    # Dis gon git recursive
-    cfg = _load_config(project)
-    _enforce_host_vars(cfg)
+    _pre_run(ctx, project)
     compose_path = _project_compose_path(project)
     projects = _discover_projects(project).values()
     compose = _generate_compose(projects)
     with open(compose_path, 'w') as f:
         f.write(compose)
     click.echo(compose)
-    
+
 
 @vessel.command()
 @click.argument("project")
@@ -448,23 +471,19 @@ def logs(ctx, project):
                    "You should create one!".format(project))
         sys.exit(1)
 
-    # Dis gon git recursive
     compose_path = _project_compose_path(project)
-    cmd = shlex.split("docker-compose -f {} logs".format(compose_path))
-    subprocess.Popen(cmd)
+    cmd = shlex.split("docker-compose -f {} logs -f".format(compose_path))
+    subprocess.Popen(cmd).wait()
 
 
 @vessel.command()
 @click.argument("project")
 @click.pass_context
 def kill(ctx, project):
-    _check_initialized()
-    if not _project_exists(project):
-        click.echo("No project named '{}' exists. "
-                   "You should create one!".format(project))
-        sys.exit(1)
-
-    # Dis gon git recursive
+    _pre_run(ctx, project)
     compose_path = _project_compose_path(project)
-    cmd = shlex.split("docker-compose -f {} kill".format(compose_path))
+    cmd = "docker-compose -f {} kill".format(compose_path)
+    if ctx.obj.debug:
+        click.echo(cmd)
+    cmd = shlex.split(cmd)
     subprocess.Popen(cmd)
