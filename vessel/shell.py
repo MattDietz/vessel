@@ -1,3 +1,10 @@
+# TODO
+# Vessel could manage multiple docker-compose envs that connect to the same network
+# A useful example would be:
+# Run all A deps
+# Now I want to add in B + deps (because A will consume it)
+# Finally, bring up a go container mounting the A path inside so I can run import
+# The utility is in having to remember less shit to type and variables to include
 import json
 import os
 import shlex
@@ -28,7 +35,9 @@ DEFAULT_CONFIG = {
     "supress_warnings": False,
     "default_backend": "docker-compose",
     "set_project_path_to_cwd": True,
-    "ssh_key_path": DEFAULT_SSH_KEY if os.path.exists(DEFAULT_SSH_KEY) else ""
+    "default_volumes": {
+        DEFAULT_SSH_KEY: "/root/.ssh"
+    }
 }
 
 
@@ -38,17 +47,19 @@ DEFAULT_PROJECT_CONFIG = {
     "image": "",
     "custom_build": False,
     "volumes": {},
+    "hostdir": "",
     "workdir": "",
     "ports": {},
     "language": "",
+    "use_cwd": False,
     "network_mode": "",
     "entrypoint": "",
     "command": "",
     "mount_ssh_keys": False,
     "default_backend": "",
     "dependencies": [],
+    "other_projects": [],
     "environment": {
-        "build": {},
         "host": {},
         "container": {}
     },
@@ -60,7 +71,7 @@ jinja_env = jinja2.Environment(
 )
 
 
-class Service(object):
+class Project(object):
     REQUIRED = ["name", "image"]
 
     def __init__(self, **kwargs):
@@ -69,6 +80,8 @@ class Service(object):
                 raise Exception("Missing required config key '{}'".format(key))
         self.command = kwargs.get("command")
         self.custom_build = kwargs.get("custom_build")
+        self.workdir = kwargs.get("workdir")
+        self.hostdir = kwargs.get("hostdir");
         self.default_backend = kwargs.get("default_backend")
         self.dependencies = kwargs.get("dependencies")
         self.entrypoint = kwargs.get("entrypoint")
@@ -78,15 +91,24 @@ class Service(object):
         self.name = kwargs.get("name")
         self.network_mode = kwargs.get("network_mode")
         self.ports = kwargs.get("ports")
-        self.volumes = kwargs.get("volumes")
+        self._volumes = kwargs.get("volumes")
 
         if "environment" in kwargs:
             self.host_env_vars = kwargs["environment"]["host"]
-            self.build_env_vars = kwargs["environment"]["build"]
             self.container_env_vars = kwargs["environment"]["container"]
+
+    @property
+    def volumes(self):
+        vol = self._volumes.copy()
+        if self.hostdir and self.workdir:
+            vol[self.hostdir] = self.workdir
+        return vol
 
     @classmethod
     def escape_host_envvars(cls, envvar):
+        """
+        Turns $ENV_VAR into ${ENV_VAR} for docker-compose to consume
+        """
         prev = None
         found_var = False
         escaped = False
@@ -150,23 +172,21 @@ def _project_compose_path(project):
     return "{}/{}".format(_project_path(project), COMPOSE_FILE)
 
 
-def _enforce_host_vars(cfg):
-    # TODO Maybe have special known vars. PROJECT_PATH if unset could
-    #      be set to CWD
-    for k, v in cfg.get("environment", {}).get("host", {}).items():
-        if k not in os.environ:
-            if v != "":
-                os.environ.setdefault(k, v)
-            else:
-                click.echo("'{}' must be set in your environment before "
-                           "the project can be run".format(k))
-                sys.exit(1)
-
-
 def _check_initialized():
     if not os.path.exists(VESSEL_ROOT) or not os.path.exists(VESSEL_CONFIG):
         click.echo("Vessel is not initialized, please run `vessel init` first")
         sys.exit(1)
+
+
+def _compose_command(compose_path, command, workdir=None, extras=None):
+    cmd = []
+    cmd.append("docker-compose -f {}".format(compose_path))
+    cmd.append(command)
+    if workdir:
+        cmd.append("-w {}".format(workdir))
+    if extras:
+        cmd.extend(extras)
+    return " ".join(cmd)
 
 
 def _enforce_editor():
@@ -181,11 +201,11 @@ def _enforce_editor():
 
 def _generate_compose(projects):
     try:
-        svc_cfg = [Service(**p) for p in projects]
+        proj_cfg = [Project(**p) for _, p in projects.items()]
     except Exception as e:
         sys.exit(e)
     template = jinja_env.get_template("docker-compose.tpl")
-    return template.render(services=svc_cfg)
+    return template.render(projects=proj_cfg)
 
 
 def _pretty_json(blob):
@@ -216,35 +236,77 @@ def _load_config(project=None):
 
 
 def _discover_projects(root_project):
-    services = {}
+    projects = {}
     cfg = _load_config(root_project)
-    services[cfg["name"]] = cfg
-    for project in cfg.get("dependencies", []):
-        sub_services = _discover_projects(project)
-        services.update(sub_services)
-    return services
+    projects[cfg["name"]] = cfg
+    for key in ["dependencies", "other_projects"]:
+        for project in cfg.get(key, []):
+            sub_projects = _discover_projects(project)
+            projects.update(sub_projects)
+    return projects
 
 
-def _pre_run(ctx, project):
+def _collect_hostvars(ctx, projects):
+    # NOTE Variable priority order
+    #      Environment > Config
+    # TODO Walk the configs and look for things that look like envvars
+    #      as per escape_host_envvars above, then error out if any
+    #      are missing
+    var_cache = {}
+    var_conflict = {}
+    var_overrides = {}
+    for _, project in projects.items():
+        for k, v in project.get("environment", {}).get("host", {}).items():
+            if k in var_cache and var_cache[k] != v:
+                var_conflict.setdefault(k, [])
+                var_conflict[k].append(project)
+            else:
+                var_cache[k] = str(v)
+                if k in os.environ:
+                    var_cache[k] = os.environ[k]
+                    var_overrides.setdefault(k, [])
+                    var_overrides[k].append(project)
+
+    errors = False
+    if ctx.obj.debug:
+        for v, proj in var_overrides.items():
+            click.echo("'{}' is already set in the environment and overrides "
+                       "settings defined in: {}".format(", ".format(proj)))
+
+    for k, proj in var_conflict.items():
+        if len(proj) > 1:
+            click.echo("Environment variable conflict! '{}' is defined "
+                        "by the following: ".format(k, ", ".join(proj)))
+            errors = True
+
+    if errors:
+        sys.exit(1)
+
+    var_cache["VESSEL_ROOT"] = VESSEL_ROOT
+    if ctx.obj.debug:
+        click.echo("Environment:")
+        for k, v in var_cache.items():
+            click.echo("{}={}".format(k, v))
+        click.echo()
+    return var_cache
+
+
+def _pre_run(ctx, project_name, project_configs):
     _check_initialized()
-    if not _project_exists(project):
+    if not _project_exists(project_name):
         click.echo("No project named '{}' exists. "
                    "You should create one!".format(project))
         sys.exit(1)
 
-    if ctx.obj.debug:
-        click.echo("Setting {} as $WORKDIR".format(os.getcwd()))
+    envvars = _collect_hostvars(ctx, project_configs)
+    envvars.update(os.environ.copy())
 
-    # TODO Automagic env vars per service, maybe?
-    # etcd project
-    # $VESSEL_DATA => ~/.vessel/etcd/data
-    cfg = _load_config(project)
-    os.environ.setdefault("HOST_WORKDIR", os.getcwd())
-    os.environ.setdefault("CONTAINER_WORKDIR", cfg.get("workdir", "/"))
-    os.environ.setdefault("VESSEL_ROOT", VESSEL_ROOT)
+    for _name, cfg in project_configs.items():
+        if cfg.get("workdir") and cfg.get("hostdir"):
+            cfg["volumes"][cfg["hostdir"]] = cfg["workdir"]
 
-    _enforce_host_vars(cfg)
-    return cfg
+    # TODO This doesn't gather all the possible env vars, dumbass
+    return envvars, project_configs[project_name]
 
 
 class CLIRoot(object):
@@ -316,25 +378,27 @@ def create(ctx, project, language):
     with open("{}/Dockerfile".format(proj_path), 'w') as f:
         f.write(tpl.render())
 
+    vessel_config = _load_config()
     proj_config = DEFAULT_PROJECT_CONFIG.copy()
 
     # TODO Load vrssel config before the command runs
     proj_config.update({
         "name": project,
         "language": language,
+        "hostdir": os.getcwd(),
+        "workdir": "/{}".format(project),
         "default_backend": DEFAULT_CONFIG["default_backend"]
     })
 
     proj_config["volumes"] = {
         "{}/data".format(proj_path): "",
-        "$WORKDIR": "/CONTAINER_MOUNT_PATH/{}".format(project)
     }
+    proj_config.update(**vessel_config["default_volumes"])
 
     if language and language.strip().lower() == "python":
         proj_config["volumes"] = {
-            "$HOME/.vessel/{}/venv".format(project): "/root/.virtualenvs"
+            "{}/venv".format(_project_path(project)): "/root/.virtualenvs"
         }
-        proj_config["environment"]["host"]["PROJECT_PATH"] = "PathToPackage"
 
     with open("{}/config.toml".format(proj_path), 'w') as f:
         f.write(toml.dumps(proj_config))
@@ -380,44 +444,46 @@ def config(ctx):
 @click.argument("project")
 @click.pass_context
 def up(ctx, project):
-    _pre_run(ctx, project)
+    projects = _discover_projects(project)
+    envvars, cfg = _pre_run(ctx, project, projects)
+
     compose_path = _project_compose_path(project)
-    projects = _discover_projects(project).values()
     with open(compose_path, 'w') as f:
         f.write(_generate_compose(projects))
 
-    cmd = shlex.split("docker-compose -f {} up -d".format(compose_path))
-    subprocess.Popen(cmd)
+    cmd = _compose_command(compose_path, "up -d")
+    if ctx.obj.debug:
+        click.echo(cmd)
+    cmd = shlex.split(cmd)
+    subprocess.Popen(cmd, env=envvars).wait()
 
 
 @vessel.command()
 @click.argument("project", nargs=1)
 @click.argument("command", nargs=-1)
 @click.option("-s", "--service", default=None)
+@click.option("-w", "--workdir", default=None)
 @click.pass_context
-def run(ctx, project, command, service):
-    cfg = _pre_run(ctx, project)
+def run(ctx, project, command, service, workdir):
+    projects = _discover_projects(project)
+    service = service or project
+    workdir = workdir or projects[service].get("workdir")
+
+    envvars, cfg = _pre_run(ctx, project, projects)
+
     compose_path = _project_compose_path(project)
-    projects = _discover_projects(project).values()
     with open(compose_path, 'w') as f:
         f.write(_generate_compose(projects))
 
-    service = service or project
-    cmd = ["docker-compose -f {} run".format(compose_path)]
-    if cfg.get("workdir"):
-        cmd.append("-w {}".format(cfg["workdir"]))
-
-    cmd.append(service)
-
-    if command:
-        cmd.extend(command)
-
-    cmd = " ".join(cmd)
-
+    extras = [service]
+    extras.extend(command)
+    cmd = _compose_command(compose_path, "run",
+                           workdir=workdir, extras=extras)
     if ctx.obj.debug:
         click.echo(cmd)
     cmd = shlex.split(cmd)
-    subprocess.Popen(cmd, stdin=sys.stdout, stdout=sys.stdin).wait()
+    subprocess.Popen(cmd, stdin=sys.stdout, stdout=sys.stdin,
+                     env=envvars).wait()
 
 
 @vessel.command()
@@ -426,9 +492,10 @@ def run(ctx, project, command, service):
 @click.option("-s", "--service", default=None)
 @click.pass_context
 def exec(ctx, project, command, service):
-    cfg = _pre_run(ctx, project)
+    projects = _discover_projects(project)
+    cfg = _pre_run(ctx, project, projects)
+
     compose_path = _project_compose_path(project)
-    projects = _discover_projects(project).values()
     with open(compose_path, 'w') as f:
         f.write(_generate_compose(projects))
 
@@ -452,9 +519,10 @@ def exec(ctx, project, command, service):
 @click.argument("project")
 @click.pass_context
 def export(ctx, project):
-    _pre_run(ctx, project)
+    projects = _discover_projects(project)
+    cfg = _pre_run(ctx, project, projects)
+
     compose_path = _project_compose_path(project)
-    projects = _discover_projects(project).values()
     compose = _generate_compose(projects)
     with open(compose_path, 'w') as f:
         f.write(compose)
@@ -465,7 +533,6 @@ def export(ctx, project):
 @click.argument("project")
 @click.pass_context
 def logs(ctx, project):
-    _check_initialized()
     if not _project_exists(project):
         click.echo("No project named '{}' exists. "
                    "You should create one!".format(project))
@@ -480,7 +547,8 @@ def logs(ctx, project):
 @click.argument("project")
 @click.pass_context
 def kill(ctx, project):
-    _pre_run(ctx, project)
+    projects = _discover_projects(project)
+    _pre_run(ctx, project, projects)
     compose_path = _project_compose_path(project)
     cmd = "docker-compose -f {} kill".format(compose_path)
     if ctx.obj.debug:
