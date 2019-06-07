@@ -451,7 +451,7 @@ def up(ctx, project):
     with open(compose_path, 'w') as f:
         f.write(_generate_compose(projects))
 
-    cmd = _compose_command(compose_path, "up -d")
+    cmd = _compose_command(compose_path, "up --force-recreate -d")
     if ctx.obj.debug:
         click.echo(cmd)
     cmd = shlex.split(cmd)
