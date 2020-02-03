@@ -39,4 +39,10 @@ services:
     {%- endif %}
     {%- endfor %}
     {%- endif %}
+    {%- if project.caps %}
+    cap_add:
+    {%- for cap in project.caps %}
+      - {{ cap }}
     {%- endfor %}
+    {%- endif %}
+  {%- endfor %}

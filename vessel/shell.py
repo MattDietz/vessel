@@ -59,6 +59,7 @@ DEFAULT_PROJECT_CONFIG = {
     "default_backend": "",
     "dependencies": [],
     "other_projects": [],
+    "caps": [],
     "environment": {
         "host": {},
         "container": {}
@@ -92,6 +93,7 @@ class Project(object):
         self.network_mode = kwargs.get("network_mode")
         self.ports = kwargs.get("ports")
         self._volumes = kwargs.get("volumes")
+        self.caps = kwargs.get("caps", [])
 
         if "environment" in kwargs:
             self.host_env_vars = kwargs["environment"]["host"]
