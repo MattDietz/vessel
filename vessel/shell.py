@@ -101,10 +101,12 @@ class Project(object):
 
     @property
     def volumes(self):
+        # for "delegated" volumes see
+        # https://engageinteractive.co.uk/blog/making-docker-faster-on-mac
         vol = self._volumes.copy()
         if self.hostdir and self.workdir:
             vol[self.hostdir] = self.workdir
-        return vol
+        return {k: "{}:delegated".format(v) for k, v in vol.items()}
 
     @classmethod
     def escape_host_envvars(cls, envvar):
