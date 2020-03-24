@@ -59,6 +59,13 @@ DEFAULT_PROJECT_CONFIG = {
     "default_backend": "",
     "dependencies": [],
     "other_projects": [],
+    "healthcheck": {
+        "test": "",
+        "interval": "1m30s",
+        "timeout": "30s",
+        "retries": 3,
+        "start_period": "0s",
+    },
     "caps": [],
     "environment": {
         "host": {},
@@ -98,6 +105,19 @@ class Project(object):
         if "environment" in kwargs:
             self.host_env_vars = kwargs["environment"]["host"]
             self.container_env_vars = kwargs["environment"]["container"]
+
+        if "healthcheck" in kwargs:
+            cfg = kwargs["healthcheck"]
+            if len(cfg["test"]) == 0:
+                raise Exception("Missing test for healthcheck,"
+                                ", cannot continue")
+            if not cfg["test"][0] == "CMD":
+                cfg["test"].insert(0, "CMD")
+
+            defaults = DEFAULT_PROJECT_CONFIG["healthcheck"]
+            self.healthcheck = cfg
+            for key, val in defaults.items():
+                self.healthcheck[key] = cfg.get(key, val)
 
     @property
     def volumes(self):

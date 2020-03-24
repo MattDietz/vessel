@@ -1,4 +1,4 @@
-version: '3'
+version: '3.7'
 
 services:
   {%- for project in projects %}
@@ -25,6 +25,14 @@ services:
     network_mode: "{{ project.network_mode }}"
     {%- endif %}
 
+    {%- if project.healthcheck %}
+    healthcheck:
+      test: [{% for t in project.healthcheck["test"] %}"{{ t }}"{% if not loop.last %}, {% endif %}{% endfor %}]
+      interval: "{{ project.healthcheck["interval"] }}"
+      timeout: "{{ project.healthcheck["timeout"] }}"
+      retries: {{ project.healthcheck["retries"] }}
+      start_period: "{{ project.healthcheck["start_period"] }}"
+    {%- endif %}
     {%- if project.ports %}
     ports:
     {%- for source, dest in project.ports.items() %}
