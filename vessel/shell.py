@@ -556,16 +556,21 @@ def export(ctx, project):
 
 
 @vessel.command()
+@click.option("-s", "--service", default=None)
 @click.argument("project")
 @click.pass_context
-def logs(ctx, project):
+def logs(ctx, project, service):
     if not _project_exists(project):
         click.echo("No project named '{}' exists. "
                    "You should create one!".format(project))
         sys.exit(1)
 
     compose_path = _project_compose_path(project)
-    cmd = shlex.split("docker-compose -f {} logs -f".format(compose_path))
+    cmd = "docker-compose -f {} logs -f".format(compose_path)
+    if service:
+        cmd = "{} {}".format(cmd, service)
+
+    cmd = shlex.split(cmd)
     subprocess.Popen(cmd).wait()
 
 
