@@ -16,7 +16,7 @@ services:
     {%- endfor %}
     {%- endif %}
     {%- if project.command %}
-    command: {{ project.command }}
+    command: [{% for t in project.command %}"{{ t }}"{% if not loop.last %}, {% endif %}{% endfor %}]
     {%- elif project.entrypoint %}
     entrypoint: {{ project.entrypoint }}
     {%- endif %}

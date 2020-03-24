@@ -87,6 +87,8 @@ class Project(object):
             if key not in kwargs:
                 raise Exception("Missing required config key '{}'".format(key))
         self.command = kwargs.get("command")
+        if self.command:
+            self.command = self.command.split(" ")
         self.custom_build = kwargs.get("custom_build")
         self.workdir = kwargs.get("workdir")
         self.hostdir = kwargs.get("hostdir");
