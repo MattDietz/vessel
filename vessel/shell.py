@@ -1,3 +1,4 @@
+from __future__ import print_function
 # TODO
 # Vessel could manage multiple docker-compose envs that connect to the same network
 # A useful example would be:
@@ -23,6 +24,9 @@ COMPOSE_FILE = "docker-compose.yaml"
 
 # This implicitly supports any other language. We just check for
 # $LANG_base_*
+# TODO default volume mounts by language type. Languages should move to a sub
+#      "languages" key, but are arbitrary. We won't enforce the names
+# TODO drop the Dockerfile and backend types. We won't use them
 DEFAULT_CONFIG = {
     "python": {
         "base_image": "",
@@ -255,8 +259,23 @@ def _pretty_toml(blob, outer=""):
 
 def _load_config(project=None):
     if project:
+        alias = None
+        if "@" in project:
+            parts = project.split('@')
+            if len(parts) != 2:
+                sys.exit("Invalid project string {}".format(project))
+            alias = parts[0]
+            project = parts[1]
+
+        # Assume it's an image and let Docker figure it out
+        if not os.path.exists(_project_config_path(project)):
+            return {"image": project, "name": alias or project}
+
         with open(_project_config_path(project), 'r') as f:
-            return toml.load(f)
+            cfg = toml.load(f)
+            cfg["name"] = alias or project
+            return cfg
+
     with open(VESSEL_CONFIG, 'r') as f:
         return toml.load(f)
 
@@ -491,6 +510,11 @@ def up(ctx, project):
 @click.option("-w", "--workdir", default=None)
 @click.pass_context
 def run(ctx, project, command, service, workdir):
+    click.echo("*" * 80)
+    click.echo("Remember that you need to turn off network_mode on each of "
+               "the projects, and probably fix configs! Also don't forget to "
+               "remove this message when you've finally done that!")
+    click.echo("*" * 80)
     projects = _discover_projects(project)
     service = service or project
     workdir = workdir or projects[service].get("workdir")
@@ -503,7 +527,7 @@ def run(ctx, project, command, service, workdir):
 
     extras = [service]
     extras.extend(command)
-    cmd = _compose_command(compose_path, "run",
+    cmd = _compose_command(compose_path, "run --service-ports",
                            workdir=workdir, extras=extras)
     if ctx.obj.debug:
         click.echo(cmd)
