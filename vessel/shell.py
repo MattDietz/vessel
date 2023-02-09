@@ -6,6 +6,16 @@ from __future__ import print_function
 # Now I want to add in B + deps (because A will consume it)
 # Finally, bring up a go container mounting the A path inside so I can run import
 # The utility is in having to remember less shit to type and variables to include
+# TODO Provide substitution in the template for the current user ${USER} or something
+# TODO Allow for aliases in the template that can be injected into a container?
+# TODO need a way to distinguish services from projects. We want to run kafka-pixy
+#      as part of censor, but we also want to develop against it, without duplicating
+#      configs. Distinct entrypoints for running as service versus project?
+#      /path/to/command vs /bin/bash
+# TODO additionally, annotations on dependencies to override some things. like:
+#      "spark:master" uses the master config, "spark:worker" uses the worker config
+# TODO Make the environment.* sections optional
+# TODO Allow project DNS to override global DNS
 import json
 import os
 import shlex
@@ -18,30 +28,12 @@ import toml
 
 VESSEL_ROOT = os.path.expanduser("~/.vessel")
 VESSEL_CONFIG = "{}/config.toml".format(VESSEL_ROOT)
-DEFAULT_SSH_KEY = os.path.expanduser("~/.ssh")
 CONFIG_FILE = "config.toml"
 COMPOSE_FILE = "docker-compose.yaml"
 
-# This implicitly supports any other language. We just check for
-# $LANG_base_*
-# TODO default volume mounts by language type. Languages should move to a sub
-#      "languages" key, but are arbitrary. We won't enforce the names
-# TODO drop the Dockerfile and backend types. We won't use them
 DEFAULT_CONFIG = {
-    "python": {
-        "base_image": "",
-        "base_dockerfile": ""
-    },
-    "golang": {
-        "base_image": "",
-        "base_dockerfile": ""
-    },
     "supress_warnings": False,
-    "default_backend": "docker-compose",
-    "set_project_path_to_cwd": True,
-    "default_volumes": {
-        DEFAULT_SSH_KEY: "/root/.ssh"
-    }
+    "default_volumes": {}
 }
 
 
@@ -79,7 +71,8 @@ DEFAULT_PROJECT_CONFIG = {
 
 jinja_env = jinja2.Environment(
     loader=jinja2.PackageLoader('vessel', 'templates'),
-    autoescape=jinja2.select_autoescape(['tpl'])
+# TODO do I want to leave autoescape off?
+#    autoescape=jinja2.select_autoescape(['tpl'])
 )
 
 
@@ -155,10 +148,13 @@ class Project(object):
                         (c_val >= 97 and c_val <= 122) or \
                         (c_val == 95):
                     pass
+                elif c == '{':
+                    # This is already scoped as a variable, let it pass through
+                    found_var = False
                 else:
                     # Found the end of the var
                     var = envvar[var_start+1:i]
-                    strbuffer.extend("{{{}}}".format(var))
+                    strbuffer.extend(f"{{{var}}}")
                     var_start = -1
                     found_var = False
 
@@ -181,7 +177,7 @@ class Project(object):
         # We got to the end of the string
         if found_var:
             var = envvar[var_start+1:]
-            strbuffer.extend("{{{}}}".format(var))
+            strbuffer.extend(f"{{{var}}}")
 
         return "".join(strbuffer)
 
@@ -229,13 +225,13 @@ def _enforce_editor():
         return os.environ["VISUAL"]
 
 
-def _generate_compose(projects):
+def _generate_compose(base_config, projects):
     try:
         proj_cfg = [Project(**p) for _, p in projects.items()]
     except Exception as e:
         sys.exit(e)
     template = jinja_env.get_template("docker-compose.tpl")
-    return template.render(projects=proj_cfg)
+    return template.render(base_config=base_config, projects=proj_cfg)
 
 
 def _pretty_json(blob):
@@ -494,7 +490,7 @@ def up(ctx, project):
 
     compose_path = _project_compose_path(project)
     with open(compose_path, 'w') as f:
-        f.write(_generate_compose(projects))
+        f.write(_generate_compose(ctx.obj.config, projects))
 
     cmd = _compose_command(compose_path, "up --force-recreate -d")
     if ctx.obj.debug:
@@ -523,7 +519,7 @@ def run(ctx, project, command, service, workdir):
 
     compose_path = _project_compose_path(project)
     with open(compose_path, 'w') as f:
-        f.write(_generate_compose(projects))
+        f.write(_generate_compose(ctx.obj.config, projects))
 
     extras = [service]
     extras.extend(command)
@@ -547,7 +543,7 @@ def exec(ctx, project, command, service):
 
     compose_path = _project_compose_path(project)
     with open(compose_path, 'w') as f:
-        f.write(_generate_compose(projects))
+        f.write(_generate_compose(ctx.obj.config, projects))
 
     service = service or project
     cmd = ["docker-compose -f {} exec".format(compose_path)]
@@ -573,7 +569,7 @@ def export(ctx, project):
     cfg = _pre_run(ctx, project, projects)
 
     compose_path = _project_compose_path(project)
-    compose = _generate_compose(projects)
+    compose = _generate_compose(ctx.obj.config, projects)
     with open(compose_path, 'w') as f:
         f.write(compose)
     click.echo(compose)
@@ -605,6 +601,7 @@ def kill(ctx, project):
     projects = _discover_projects(project)
     _pre_run(ctx, project, projects)
     compose_path = _project_compose_path(project)
+    compose = _generate_compose(ctx.obj.config, projects)
     cmd = "docker-compose -f {} kill".format(compose_path)
     if ctx.obj.debug:
         click.echo(cmd)

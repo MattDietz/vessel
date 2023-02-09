@@ -12,7 +12,7 @@ services:
     {%- if project.container_env_vars %}
     environment:
     {%- for name, value in project.container_env_vars.items() %}
-      {{ name }}: "{{ project.escape_host_envvars(value) }}"
+      {{ name }}: '{{ project.escape_host_envvars(value) }}'
     {%- endfor %}
     {%- endif %}
     {%- if project.command %}
@@ -21,6 +21,12 @@ services:
     entrypoint: {{ project.entrypoint }}
     {%- endif %}
     image: {{ project.image }}
+    {%- if base_config.dns %}
+    dns:
+    {%- for d in base_config.dns %}
+      - {{ d }}
+    {%- endfor %}
+    {%- endif %}
     {%- if project.network_mode %}
     network_mode: "{{ project.network_mode }}"
     {%- endif %}
