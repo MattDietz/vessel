@@ -1,5 +1,5 @@
 click==7.0
 prettytable==0.7.2
-requests==2.20.0
+requests==2.31.0
 toml==0.10.0
 jinja2
